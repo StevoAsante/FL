@@ -1,6 +1,6 @@
 # Project status and completion plan
 
-Last reviewed: 5 November 2026
+Last reviewed: 6 November 2026
 
 This document separates implemented functionality from the work still required to call FitLoop a complete university-project submission or a production service. A feature is not considered complete merely because its UI exists: its API behaviour, validation, failure states and tests must also be checked.
 
@@ -8,7 +8,7 @@ This document separates implemented functionality from the work still required t
 
 FitLoop is a connected, working MVP foundation. The main product path is present across the React application, Express API, PostgreSQL/Prisma data model and Python coaching service. The strongest completed area is the training workflow: exercise discovery, routine management, guided set recording, workout history, progression, personal records and muscle training summaries.
 
-The application has an app-oriented responsive shell and installable web-app foundation, with explicit loading, error and retry feedback across the overview, workouts and community areas. It supports offline workout queueing and retry-safe synchronisation, including account isolation, reload recovery, sign-out/sign-in recovery, expired-session retry and invalid-payload handling. Account deletion is covered by both unit tests and a PostgreSQL-backed cascade test. The latest branch-head CI run (5 November 2026) passed both application and coaching-service jobs, including the browser suite.
+The application has an app-oriented responsive shell and installable web-app foundation, with explicit loading, error and retry feedback across the overview, workouts and community areas. It supports offline workout queueing and retry-safe synchronisation, including account isolation, reload recovery, sign-out/sign-in recovery, expired-session retry and invalid-payload handling. Account deletion is covered by unit tests and a PostgreSQL-backed cascade test that now includes bidirectional blocks and private reports. The latest branch-head CI run ([6 November 2026](https://github.com/stevosantedev/FitloopProject/actions/runs/42295260135)) passed both application and coaching-service jobs, including the full browser suite.
 
 ## Implemented product areas
 
@@ -17,7 +17,7 @@ The application has an app-oriented responsive shell and installable web-app fou
 - **Training:** exercise catalogue, search and filters, exercise guides, routines, guided sessions, set metadata, workout history and progression.
 - **Exercise reference:** 101 seeded movements, 31 canonical muscles, individually authored guide content and original front/back muscle navigation artwork. Seed validation requires at least three non-empty technique steps, a substantive description, non-empty unique aliases, at least three non-empty unique coaching cues and non-empty unique equipment alternatives for every movement; it also checks muscle-link integrity and canonical muscle coverage. These checks establish data completeness and consistency, not exercise-science accuracy.
 - **Training insights:** personal records, muscle-volume estimates and recent top-load trends. These are based on logged data and clearly avoid presenting heuristic estimates as medical or physiological measurements.
-- **Social:** friend requests, accepted connections, friends-only feed, reactions and comments.
+- **Social:** private-by-default profile editing and server-enforced public/private visibility; friend requests and relationship management; friends-only text/workout feed, reactions and comments; account blocking, mutual visibility enforcement, and private post/account reports with server-side validation and rate limiting.
 - **Coaching:** user preferences, coaching history and a separate Python service with rule tests.
 - **App experience:** responsive desktop sidebar, mobile tab navigation, installable manifest, app icon, service-worker shell cache, safe-area handling, keyboard focus and reduced-motion support.
 - **Offline training:** account-scoped exercise catalogue cache, IndexedDB workout queue, reconnection sync, unique client request IDs and server-side retry idempotency.
@@ -41,14 +41,26 @@ The application has an app-oriented responsive shell and installable web-app fou
 - [ ] Do not ship media with unclear rights. If appropriate media cannot be cleared, retain the text-first guide rather than using unverified assets.
 - [ ] Check anatomy labels and diagram coverage with a credible anatomy reference; keep the illustration clearly labelled as an orientation aid, not clinical anatomy.
 
-### 3. Complete the product experience
+### 3. Expand the AI Coach and Community experience
+- [x] Deliver a dedicated responsive Coach screen with private, persistent conversations, message history, send/reply, deletion and loading/error states; the current replies are transparently identified as rule-guided, not generative AI.
+- [x] Scope coach conversation data to the authenticated account and pass only a small summary of recent completed workouts to the rule-guided service; exclude account identifiers, daily wellbeing logs and private workout notes.
+- [ ] Integrate a generative model behind a provider-neutral server adapter, with explicit user consent, data-protection review, retention rules, safety evaluation and cost controls before any external model receives personal context.
+- [ ] Add user-confirmed routine drafts and safe, evidence-grounded training adjustments after the model and evaluation approach are approved.
+- [x] Add profile editing, private-by-default visibility, friend-request/connection management, account blocking and private reports for visible posts/accounts. Blocking removes existing connections and prevents the blocked pair from viewing each other's profiles/feed activity or creating new friend requests.
+- [x] Add route and browser coverage for report/block actions, plus PostgreSQL-backed account-deletion checks for block cascades, reporter deletion and anonymisation of reports about deleted users/posts.
+- [ ] Expand the existing friends-only feed into a more complete visual community experience with richer workout/update cards, comment management, pagination and robust loading/error states; current reactions and comments are functional but the feed is not yet feature-complete.
+- [ ] Add image upload only after storage, access control, file validation, metadata stripping, deletion and media-rights decisions are implemented.
+- [ ] Deliver the in-app activity inbox after core coach and community interactions; consider push notifications only with explicit preferences and permission handling.
+- [ ] Follow `docs/product-expansion-roadmap.md` for the detailed delivery slices and acceptance criteria.
+
+### 4. Complete the wider product experience
 - [ ] Conduct a structured usability evaluation with representative users after ethics approval where required.
 - [ ] Fix issues found in onboarding, workout creation, guided workout use, exercise search, history and social flows.
 - [ ] Decide and implement the intended notification scope (for example, workout reminders or friend activity), including user controls and permission-denied states. Notifications are not currently a delivered feature.
 - [ ] Review accessibility against WCAG 2.2 AA for contrast, focus, labels, keyboard use, touch targets, motion and screen-reader announcements.
 - [ ] Add clear account, privacy, data export and deletion explanations appropriate to the final project scope.
 
-### 4. Production security and operations
+### 5. Production security and operations
 - [ ] Replace local-storage bearer-token handling with Secure, HttpOnly, SameSite cookie sessions and implement CSRF protection. Review CORS, HTTPS and proxy configuration together.
 - [ ] Add password reset and email verification if the intended deployment requires real public accounts; configure a trusted email provider and abuse controls.
 - [ ] Review rate limits across login, registration, social actions and other write endpoints; add appropriate monitoring and audit events without logging secrets or sensitive content.
@@ -56,7 +68,7 @@ The application has an app-oriented responsive shell and installable web-app fou
 - [ ] Deploy the frontend, API, database and coaching service to the chosen host; configure domains, TLS, CORS, service URLs and a repeatable release process.
 - [ ] Run dependency and security checks, review privacy disclosures and complete a threat-model pass before exposing the service publicly.
 
-### 5. University submission and evidence
+### 6. University submission and evidence
 - [ ] Confirm the final assessment brief and map every required objective to a FitLoop feature, test or evaluation result.
 - [ ] Complete the report: problem statement, research/literature, requirements, design/architecture, implementation, testing, evaluation, limitations, ethics/privacy and future work.
 - [ ] Include architecture and data-model diagrams, key interface screenshots and a clear explanation of the coaching logic and training calculations.
@@ -75,8 +87,8 @@ The application has an app-oriented responsive shell and installable web-app fou
 
 ## Scope decisions still needed
 
-The project should not grow indefinitely by adding features without reference to the assessment brief. In particular, notifications, password reset/email verification, data export and public deployment depend on the intended final scope. The priority should be to stabilise and evaluate the existing training-centred product before expanding it.
+The project should not grow indefinitely by adding features without reference to the assessment brief. In particular, notifications, password reset/email verification, data export and public deployment depend on the intended final scope. The priority is to keep stabilising and evaluating the training foundation while delivering the AI Coach and Community workstreams in controlled, testable slices.
 
 ## Current release status
 
-The feature branch and pull request remain in draft and unmerged. The project is not yet a finished production service. The latest branch-head CI run (5 November 2026) passed both jobs, including the expanded browser suite. The immediate next step is to complete the human QA checklist, then continue the exercise-library quality/media review and usability evaluation.
+The feature branch and pull request remain in draft and unmerged. The project is not yet a finished production service. The latest completed branch-head CI run (6 November 2026, [run 42295260135](https://github.com/stevosantedev/FitloopProject/actions/runs/42295260135)) passed both jobs, including Prisma migration/schema validation, catalogue seeding, backend tests, frontend build and the full Playwright browser suite. The next major product phase is now planned in `docs/product-expansion-roadmap.md`: begin the AI Coach conversation experience and the richer Community feed in parallel, while exercise-library review, media-rights checks and human QA continue as parallel quality work. Do not hold these product workstreams until all 101 exercise guides have received expert review.

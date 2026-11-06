@@ -40,6 +40,9 @@ const exercise = {
 
 async function mockApplicationApi(page: Page, onSessionSave?: (body: any) => void, sessionSaveStatus: number | (() => number) = 200, muscleStats: any[] = []) {
   const routines: any[] = [];
+  const conversations: any[] = [];
+  const chatMessages: Record<string, any[]> = {};
+  const socialPosts: any[] = [];
   await page.route("http://localhost:4000/**", async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -56,6 +59,25 @@ async function mockApplicationApi(page: Page, onSessionSave?: (body: any) => voi
       body = { logs: [] };
     } else if (url.pathname === "/api/coach/history") {
       body = { events: [] };
+    } else if (url.pathname === "/api/coach/conversations" && method === "GET") {
+      body = { conversations };
+    } else if (url.pathname === "/api/coach/conversations" && method === "POST") {
+      const conversation = { id: "chat-1", title: "New conversation", updatedAt: new Date().toISOString(), _count: { messages: 0 } };
+      conversations.unshift(conversation);
+      chatMessages[conversation.id] = [];
+      body = { conversation };
+    } else if (url.pathname === "/api/coach/conversations/chat-1/messages" && method === "GET") {
+      body = { messages: chatMessages["chat-1"] ?? [] };
+    } else if (url.pathname === "/api/coach/conversations/chat-1/messages" && method === "POST") {
+      const input = request.postDataJSON();
+      const messages = [
+        { id: "chat-user-1", role: "user", content: input.message, createdAt: new Date().toISOString() },
+        { id: "chat-assistant-1", role: "assistant", content: "I can see your recent FitLoop training. What goal would you like to focus on?", createdAt: new Date().toISOString() }
+      ];
+      chatMessages["chat-1"] = [...(chatMessages["chat-1"] ?? []), ...messages];
+      conversations[0].title = input.message.slice(0, 70);
+      conversations[0]._count.messages = chatMessages["chat-1"].length;
+      body = { messages, responseMode: "guided_rules" };
     } else if (url.pathname === "/api/workouts/exercises") {
       body = { exercises: [exercise] };
     } else if (url.pathname === "/api/workouts/routines" && method === "GET") {
@@ -101,8 +123,19 @@ async function mockApplicationApi(page: Page, onSessionSave?: (body: any) => voi
       body = { muscles: muscleStats };
     } else if (url.pathname === "/api/social/friends") {
       body = { connections: [] };
+    } else if (url.pathname === "/api/social/blocks" && method === "GET") {
+      body = { blocks: [] };
+    } else if (url.pathname === "/api/social/posts" && method === "POST") {
+      const input = request.postDataJSON();
+      const post = { id: "post-text-1", type: "update", text: input.text, createdAt: new Date().toISOString(),
+        user: { id: "user-1", username: "tester" }, reactions: [], comments: [] };
+      socialPosts.unshift(post);
+      body = { post };
+    } else if (url.pathname === "/api/social/posts/post-text-1" && method === "DELETE") {
+      socialPosts.splice(0, socialPosts.length);
+      body = { deleted: true };
     } else if (url.pathname === "/api/social/feed") {
-      body = { posts: [] };
+      body = { posts: socialPosts };
     }
 
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
@@ -613,4 +646,74 @@ test("a failed exercise-library request shows an explicit retry instead of an em
   await page.getByRole("button", { name: "Try again" }).click();
   await expect(page.getByText("Goblet squat", { exact: true }).first()).toBeVisible();
   expect(attempts).toBe(2);
+});
+
+test("dedicated coach workspace creates a conversation and displays a guided reply", async ({ page }) => {
+  await mockApplicationApi(page);
+  await page.goto("/");
+  await page.getByLabel("Email").fill("tester@example.com");
+  await page.getByLabel("Password").fill("test-password");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.locator(".sidebar-nav").getByRole("button", { name: "Coach" }).click();
+  await expect(page.getByRole("heading", { name: "Meet your coach." })).toBeVisible();
+  await page.getByLabel("Message your coach").fill("Can you help me review my progress?");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator(".coach-chat-bubble.user")).toContainText("Can you help me review my progress?");
+  await expect(page.locator(".coach-chat-bubble.assistant")).toContainText("I can see your recent FitLoop training.");
+  await expect(page.getByText(/rule-based coaching rather than a generative AI model/)).toBeVisible();
+});
+
+test("community users can share a friends-only text update", async ({ page }) => {
+  await mockApplicationApi(page);
+  await page.goto("/");
+  await page.getByLabel("Email").fill("tester@example.com");
+  await page.getByLabel("Password").fill("test-password");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.locator(".sidebar-nav").getByRole("button", { name: "Community" }).click();
+  await expect(page.getByRole("heading", { name: "Your community." })).toBeVisible();
+  await page.getByLabel("Write a community update").fill("First week back in the gym. Feeling good about the progress.");
+  await page.getByRole("button", { name: "Share update" }).click();
+  await expect(page.locator(".feed-card")).toContainText("First week back in the gym. Feeling good about the progress.");
+  await expect(page.getByText(/Shared with accepted friends/)).toBeVisible();
+});
+
+
+test("community block and report controls call the moderation API", async ({ page }) => {
+  await mockApplicationApi(page);
+  const calls: Array<{ path: string; method: string }> = [];
+  await page.route("http://localhost:4000/api/social/**", async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    calls.push({ path: url.pathname, method: request.method() });
+    if (url.pathname === "/api/social/friends") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ connections: [{
+        id: "connection-1", status: "accepted",
+        requester: { id: "user-1", username: "tester", displayName: "Tester" },
+        addressee: { id: "user-2", username: "friend", displayName: "Friend" }
+      }] }) });
+      return;
+    }
+    if (url.pathname === "/api/social/blocks") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ blocks: [] }) });
+      return;
+    }
+    if (url.pathname === "/api/social/feed") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ posts: [] }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ blocked: true, report: { id: "report-1", status: "open" } }) });
+  });
+  page.on("dialog", dialog => dialog.accept());
+  await page.goto("/");
+  await page.getByLabel("Email").fill("tester@example.com");
+  await page.getByLabel("Password").fill("test-password");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.locator(".sidebar-nav").getByRole("button", { name: "Community" }).click();
+  await expect(page.getByRole("heading", { name: "Friends and requests" })).toBeVisible();
+  await page.getByRole("button", { name: "Report account" }).click();
+  await expect(page.getByRole("status")).toContainText("Report submitted privately");
+  expect(calls.some(call => call.path === "/api/social/reports" && call.method === "POST")).toBeTruthy();
+  await page.getByRole("button", { name: "Block", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("Account blocked");
+  expect(calls.some(call => call.path === "/api/social/blocks/user-2" && call.method === "POST")).toBeTruthy();
 });

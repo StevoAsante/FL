@@ -11,7 +11,7 @@ import MuscleMap from "./components/MuscleMap";
 import GuidedRestTimer from "./components/GuidedRestTimer";
 import { clearQueuedWorkouts, getQueuedWorkouts, queueWorkout, removeQueuedWorkout } from "./offlineWorkoutQueue";
 
-type User = { id: string; username: string };
+type User = { id: string; username: string; displayName?: string | null; bio?: string | null };
 
 class ApiRequestError extends Error {
   constructor(message: string, readonly status: number) {
@@ -39,6 +39,7 @@ type WorkoutSession = {
   routine?: { name: string } | null;
   sets: Array<{ id: string; reps: number; weightKg?: number | null; completed: boolean; setType?: string; restSeconds?: number; rir?: number | null; rpe?: number | null; exercise: Exercise }>;
 };
+type BlockedAccount = { id: string; username: string; displayName?: string | null };
 type FriendConnection = {
   id: string;
   status: string;
@@ -48,12 +49,16 @@ type FriendConnection = {
 type FeedPost = {
   id: string;
   createdAt: string;
+  text?: string | null;
+  type?: string;
   user: User;
   session?: WorkoutSession | null;
   reactions: Array<{ value: string; userId: string }>;
   comments: Array<{ id: string; text: string; user: { username: string } }>;
 };
 type CoachMessage = { id: string; message: string; explanation: string; decision?: string };
+type CoachConversation = { id: string; title: string; updatedAt: string; messages?: Array<{ id: string; role: string; content: string }>; _count?: { messages: number } };
+type CoachChatMessage = { id: string; role: "user" | "assistant"; content: string; createdAt: string };
 type CoachPreference = { style: "gentle" | "direct"; focus: "energy" | "consistency" | "recovery" };
 type PersonalRecord = { exerciseId: string; exerciseName: string; heaviestLoad: { value: number; date: string | null; sessionId: string | null } | null; mostReps: { value: number; date: string | null; sessionId: string | null } | null; highestSetVolume: { value: number; date: string | null; sessionId: string | null } | null };
 
@@ -70,6 +75,13 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [logs, setLogs] = useState<DailyLog[]>([]);
   const [coachMessages, setCoachMessages] = useState<CoachMessage[]>([]);
+  const [coachConversations, setCoachConversations] = useState<CoachConversation[]>([]);
+  const [activeCoachConversationId, setActiveCoachConversationId] = useState("");
+  const [coachChatMessages, setCoachChatMessages] = useState<CoachChatMessage[]>([]);
+  const [coachDraft, setCoachDraft] = useState("");
+  const [coachChatLoading, setCoachChatLoading] = useState(false);
+  const [coachChatSending, setCoachChatSending] = useState(false);
+  const [coachChatError, setCoachChatError] = useState("");
   // Keep the selected coaching tone and focus available while the user edits their preferences.
   const [coachPreference, setCoachPreference] = useState<CoachPreference>({ style: "gentle", focus: "energy" });
   const [exercises, setExercises] = useState<Exercise[]>([]);
@@ -88,8 +100,9 @@ export default function App() {
   const [personalRecords, setPersonalRecords] = useState<PersonalRecord[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const [connections, setConnections] = useState<FriendConnection[]>([]);
+  const [blockedAccounts, setBlockedAccounts] = useState<BlockedAccount[]>([]);
   const [posts, setPosts] = useState<FeedPost[]>([]);
-  const [activeTab, setActiveTab] = useState<"home" | "workouts" | "community">("home");
+  const [activeTab, setActiveTab] = useState<"home" | "workouts" | "community" | "coach">("home");
   const [notice, setNotice] = useState("");
   // Keep first-load and refresh failures separate from legitimate empty account data.
   const [dashboardLoading, setDashboardLoading] = useState(false);
@@ -123,6 +136,10 @@ export default function App() {
     };
   }
   const [friendUsername, setFriendUsername] = useState("");
+  const [profileNameDraft, setProfileNameDraft] = useState("");
+  const [profileBioDraft, setProfileBioDraft] = useState("");
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [communityPostDraft, setCommunityPostDraft] = useState("");
   const [commentDrafts, setCommentDrafts] = useState<Record<string, string>>({});
 
   /**
@@ -174,6 +191,8 @@ export default function App() {
       // Restore the profile and coaching preferences when a saved session is reopened in the browser.
       const profile = await request("/api/me");
       setUser(profile.user);
+      setProfileNameDraft(profile.user.displayName ?? "");
+      setProfileBioDraft(profile.user.bio ?? "");
       localStorage.setItem("fitloop-user", JSON.stringify(profile.user));
       const preferenceData = await request("/api/coach/preferences");
       setCoachPreference(preferenceData.preference);
@@ -262,18 +281,96 @@ export default function App() {
     setCommunityError("");
     try {
       // Friends and feed data use the same access-controlled API as the rest of the account.
-      const [friendData, feedData] = await Promise.all([
+      const [friendData, feedData, blockData] = await Promise.all([
         request("/api/social/friends"),
-        request("/api/social/feed")
+        request("/api/social/feed"),
+        request("/api/social/blocks")
       ]);
       setConnections(friendData.connections);
       setPosts(feedData.posts);
+      setBlockedAccounts(blockData.blocks.map((item: any) => item.blockedUser));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not load your community.";
       setCommunityError(message);
       setNotice(message);
     } finally {
       setCommunityLoading(false);
+    }
+  }
+
+  // Conversation history is private and loaded only after the coach destination is opened.
+  async function loadCoachConversations() {
+    setCoachChatLoading(true);
+    setCoachChatError("");
+    try {
+      const data = await request("/api/coach/conversations");
+      setCoachConversations(data.conversations);
+      if (!activeCoachConversationId && data.conversations[0]) setActiveCoachConversationId(data.conversations[0].id);
+    } catch (error) {
+      setCoachChatError(error instanceof Error ? error.message : "Could not load coach conversations.");
+    } finally { setCoachChatLoading(false); }
+  }
+
+  async function loadCoachChat(conversationId: string) {
+    setCoachChatLoading(true);
+    setCoachChatError("");
+    try {
+      const data = await request("/api/coach/conversations/" + conversationId + "/messages");
+      setCoachChatMessages(data.messages);
+    } catch (error) {
+      setCoachChatError(error instanceof Error ? error.message : "Could not load this conversation.");
+    } finally { setCoachChatLoading(false); }
+  }
+
+  async function createCoachConversation() {
+    try {
+      const data = await request("/api/coach/conversations", { method: "POST", body: JSON.stringify({}) });
+      setCoachConversations(current => [data.conversation, ...current]);
+      setActiveCoachConversationId(data.conversation.id);
+      setCoachChatMessages([]);
+      setCoachChatError("");
+    } catch (error) {
+      setCoachChatError(error instanceof Error ? error.message : "Could not start a conversation.");
+    }
+  }
+
+  async function sendCoachMessage(event: React.FormEvent) {
+    event.preventDefault();
+    const message = coachDraft.trim();
+    if (!message || coachChatSending) return;
+    setCoachChatSending(true);
+    setCoachChatError("");
+    try {
+      let conversationId = activeCoachConversationId;
+      if (!conversationId) {
+        const created = await request("/api/coach/conversations", { method: "POST", body: JSON.stringify({}) });
+        conversationId = created.conversation.id;
+      }
+      const data = await request("/api/coach/conversations/" + conversationId + "/messages", {
+        method: "POST", body: JSON.stringify({ message })
+      });
+      setActiveCoachConversationId(conversationId);
+      setCoachChatMessages(current => [...current, ...data.messages]);
+      setCoachDraft("");
+      await loadCoachConversations();
+    } catch (error) {
+      setCoachChatError(error instanceof Error ? error.message : "The coach could not send a reply.");
+    } finally { setCoachChatSending(false); }
+  }
+
+  async function deleteCoachConversation(conversationId: string) {
+    if (!window.confirm("Delete this coach conversation? Its messages will also be deleted.")) return;
+    try {
+      await request("/api/coach/conversations/" + conversationId, { method: "DELETE" });
+      const remaining = coachConversations.filter(item => item.id !== conversationId);
+      setCoachConversations(remaining);
+      if (activeCoachConversationId === conversationId) {
+        setActiveCoachConversationId(remaining[0]?.id ?? "");
+        setCoachChatMessages([]);
+      }
+      setNotice("Coach conversation deleted.");
+    } catch (error) {
+      setCoachChatError(error instanceof Error ? error.message : "Could not delete this conversation.");
     }
   }
 
@@ -478,6 +575,53 @@ export default function App() {
     }
   }
 
+  // Keep the profile intentionally small: a display name and short bio are enough to give feed posts a human identity.
+  async function saveProfile(event: React.FormEvent) {
+    event.preventDefault();
+    setProfileSaving(true);
+    try {
+      const data = await request("/api/social/profile/me", {
+        method: "PATCH",
+        body: JSON.stringify({
+          displayName: profileNameDraft.trim() || null,
+          bio: profileBioDraft.trim() || null
+        })
+      });
+      setUser(current => current ? { ...current, ...data.profile } : current);
+      localStorage.setItem("fitloop-user", JSON.stringify({ ...user, ...data.profile }));
+      setNotice("Your profile has been updated.");
+      await loadCommunity();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not update your profile.");
+    } finally { setProfileSaving(false); }
+  }
+
+  // Text updates are shared only to the existing friends-only audience.
+  async function createCommunityPost(event: React.FormEvent) {
+    event.preventDefault();
+    const text = communityPostDraft.trim();
+    if (!text) return;
+    try {
+      await request("/api/social/posts", { method: "POST", body: JSON.stringify({ text }) });
+      setCommunityPostDraft("");
+      setNotice("Your update has been shared with your accepted friends.");
+      await loadCommunity();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not share your update.");
+    }
+  }
+
+  async function deleteCommunityPost(postId: string) {
+    if (!window.confirm("Delete this post and its comments and reactions?")) return;
+    try {
+      await request("/api/social/posts/" + postId, { method: "DELETE" });
+      setNotice("Your post has been deleted.");
+      await loadCommunity();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not delete your post.");
+    }
+  }
+
   // Friend requests are addressed by username; the API resolves that name and
   // prevents self-requests or duplicate pending connections.
   async function sendFriendRequest(event: React.FormEvent) {
@@ -504,6 +648,58 @@ export default function App() {
       await loadCommunity();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not accept that request.");
+    }
+  }
+
+  // Each relationship action has a matching server-side ownership and status check.
+  async function manageFriendRequest(id: string, action: "decline" | "cancel") {
+    try {
+      await request(`/api/social/friends/${id}/${action}`, { method: "POST", body: JSON.stringify({}) });
+      setNotice(action === "decline" ? "Friend request declined." : "Friend request cancelled.");
+      await loadCommunity();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not update that friend request.");
+    }
+  }
+
+  async function removeFriend(id: string) {
+    if (!window.confirm("Remove this friend? You will no longer see each other's friends-only activity.")) return;
+    try {
+      await request(`/api/social/friends/${id}`, { method: "DELETE" });
+      setNotice("Friend removed.");
+      await loadCommunity();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not remove this friend.");
+    }
+  }
+
+  async function reportCommunityTarget(targetType: "user" | "post", targetId: string) {
+    try {
+      await request("/api/social/reports", { method: "POST", body: JSON.stringify({ targetType, targetId, reason: "other" }) });
+      setNotice("Report submitted privately. Thank you for helping keep the community safe.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not submit your report.");
+    }
+  }
+
+  async function blockCommunityUser(userId: string) {
+    if (!window.confirm("Block this account? Their profile and activity will be hidden from you, your connection will be removed, and they will not be able to send you a new friend request.")) return;
+    try {
+      await request("/api/social/blocks/" + userId, { method: "POST", body: JSON.stringify({}) });
+      setNotice("Account blocked. Their activity and connection have been hidden.");
+      await loadCommunity();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not block this account.");
+    }
+  }
+
+  async function unblockCommunityUser(userId: string) {
+    try {
+      await request("/api/social/blocks/" + userId, { method: "DELETE" });
+      setNotice("Account unblocked. You can connect again if both accounts allow it.");
+      await loadCommunity();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not unblock this account.");
     }
   }
 
@@ -569,6 +765,10 @@ export default function App() {
       localStorage.removeItem("fitloop-user");
       setToken("");
       setUser(null);
+      setCoachConversations([]);
+      setActiveCoachConversationId("");
+      setCoachChatMessages([]);
+      setCoachDraft("");
       setDeletePassword("");
       setDeleteConfirmation("");
       setNotice(localDataCleared
@@ -589,6 +789,10 @@ export default function App() {
     setUser(null);
     setLogs([]);
     setCoachMessages([]);
+    setCoachConversations([]);
+    setActiveCoachConversationId("");
+    setCoachChatMessages([]);
+    setCoachDraft("");
     setExercises([]);
     setRoutines([]);
     setSessions([]);
@@ -605,7 +809,12 @@ export default function App() {
     // Switching tabs loads the latest records instead of showing stale cached social or workout information.
     if (token && activeTab === "workouts") void loadWorkouts();
     if (token && activeTab === "community") void loadCommunity();
+    if (token && activeTab === "coach") void loadCoachConversations();
   }, [token, activeTab]);
+
+  useEffect(() => {
+    if (token && activeTab === "coach" && activeCoachConversationId) void loadCoachChat(activeCoachConversationId);
+  }, [token, activeTab, activeCoachConversationId]);
 
   useEffect(() => {
     // A queued session belongs to one account. It is never sent with a different
@@ -782,6 +991,7 @@ export default function App() {
         <button className={activeTab === "home" ? "active" : ""} onClick={() => setActiveTab("home")}><span className="nav-symbol">⌂</span><span>Overview</span></button>
         <button className={activeTab === "workouts" ? "active" : ""} onClick={() => setActiveTab("workouts")}><span className="nav-symbol">↗</span><span>Workouts</span></button>
         <button className={activeTab === "community" ? "active" : ""} onClick={() => setActiveTab("community")}><span className="nav-symbol">◎</span><span>Community</span></button>
+        <button className={activeTab === "coach" ? "active" : ""} onClick={() => setActiveTab("coach")}><span className="nav-symbol">✳</span><span>Coach</span></button>
       </nav>
       <div className="sidebar-bottom">
         <div className="sidebar-profile"><span className="profile-avatar">{(user?.username ?? "F").slice(0, 1).toUpperCase()}</span><span><strong>{user?.username ?? "Your account"}</strong><small>Personal workspace</small></span></div>
@@ -790,13 +1000,14 @@ export default function App() {
     </aside>
     <div className="app-main">
       <header className="topbar">
-        <div><p className="topbar-kicker">FITLOOP / WORKSPACE</p><strong>{activeTab === "home" ? "Overview" : activeTab === "workouts" ? "Workouts" : "Community"}</strong></div>
+        <div><p className="topbar-kicker">FITLOOP / WORKSPACE</p><strong>{activeTab === "home" ? "Overview" : activeTab === "workouts" ? "Workouts" : activeTab === "community" ? "Community" : "Coach"}</strong></div>
         <div className="account">{pendingWorkoutCount > 0 && <span className="offline-queue-status" role="status">{pendingWorkoutCount} workout{pendingWorkoutCount === 1 ? "" : "s"} waiting to sync</span>}<span className="account-status"><i /> Your space</span><button className="topbar-action" onClick={() => setActiveTab("workouts")}>Start a workout <span>↗</span></button></div>
       </header>
       <nav className="mobile-nav" aria-label="Main sections">
         <button className={activeTab === "home" ? "active" : ""} onClick={() => setActiveTab("home")}><span>⌂</span>Home</button>
         <button className={activeTab === "workouts" ? "active" : ""} onClick={() => setActiveTab("workouts")}><span>↗</span>Workouts</button>
         <button className={activeTab === "community" ? "active" : ""} onClick={() => setActiveTab("community")}><span>◎</span>Community</button>
+        <button className={activeTab === "coach" ? "active" : ""} onClick={() => setActiveTab("coach")}><span>✳</span>Coach</button>
       </nav>
 
     {activeTab === "home" && <>
@@ -1152,10 +1363,44 @@ export default function App() {
       </section>
     </section>}
 
+    {activeTab === "coach" && <section className="page-section">
+      <div className="welcome compact"><p className="eyebrow">YOUR TRAINING COMPANION</p><h1>Meet your coach.</h1><p className="muted">Ask about your logged training, exercise technique or how to shape your next routine.</p></div>
+      <div className="coach-chat-layout">
+        <aside className="panel coach-conversation-list">
+          <div className="section-heading-row"><h2>Conversations</h2><button type="button" className="small-button" onClick={() => void createCoachConversation()}>New chat +</button></div>
+          {coachConversations.length === 0 && !coachChatLoading ? <p className="muted">Your conversations will appear here.</p> : coachConversations.map(conversation => <div className={"coach-conversation-row " + (activeCoachConversationId === conversation.id ? "active" : "")} key={conversation.id}>
+            <button type="button" className="coach-conversation-select" onClick={() => setActiveCoachConversationId(conversation.id)}><strong>{conversation.title}</strong><small>{conversation._count?.messages ?? 0} messages</small></button>
+            <button type="button" className="small-button" aria-label={"Delete " + conversation.title} onClick={() => void deleteCoachConversation(conversation.id)}>×</button>
+          </div>)}
+        </aside>
+        <section className="panel coach-chat-panel">
+          <div className="section-heading-row"><div><p className="eyebrow">FITLOOP COACH</p><h2>{coachConversations.find(item => item.id === activeCoachConversationId)?.title ?? "Start a conversation"}</h2></div></div>
+          {coachChatLoading && <p className="load-state" role="status">Loading your conversation…</p>}
+          {coachChatError && <div className="load-error" role="alert"><span>{coachChatError}</span><button type="button" className="secondary" onClick={() => activeCoachConversationId ? void loadCoachChat(activeCoachConversationId) : void loadCoachConversations()}>Try again</button></div>}
+          <div className="coach-chat-messages" aria-live="polite">
+            {coachChatMessages.length === 0 && <div className="coach-chat-empty"><strong>What would you like help with?</strong><p className="muted">Try asking about your recent progress, a training plan or an exercise in your library.</p></div>}
+            {coachChatMessages.map(message => <article className={"coach-chat-bubble " + message.role} key={message.id}><span>{message.role === "assistant" ? "FitLoop Coach" : "You"}</span><p>{message.content}</p></article>)}
+          </div>
+          <form className="coach-chat-form" onSubmit={sendCoachMessage}>
+            <label className="sr-only" htmlFor="coach-message">Message your coach</label>
+            <textarea id="coach-message" value={coachDraft} onChange={event => setCoachDraft(event.target.value)} placeholder="Ask your coach something…" maxLength={2000} rows={3} />
+            <button disabled={!coachDraft.trim() || coachChatSending}>{coachChatSending ? "Thinking…" : "Send message"}</button>
+          </form>
+          <p className="coach-disclosure">Early guided version: replies currently use transparent, rule-based coaching rather than a generative AI model. It is not medical advice. Model-provider integration will follow privacy, consent and safety review.</p>
+        </section>
+      </div>
+    </section>}
+
     {activeTab === "community" && <section className="page-section">
       {communityLoading && <p className="load-state" role="status">Loading your community…</p>}
       {communityError && <div className="load-error" role="alert"><span>{communityError}</span><button type="button" className="secondary" onClick={() => void loadCommunity()}>Try again</button></div>}
       <div className="welcome compact"><p className="eyebrow">BETTER TOGETHER</p><h1>Your community.</h1><p className="muted">Share completed workouts with people you've connected with.</p></div>
+      <form className="panel community-profile-form" onSubmit={saveProfile}>
+        <div><p className="eyebrow">YOUR PROFILE</p><h2>Make it yours</h2><p className="muted">Choose how your name and short introduction appear to accepted friends. Your email and private account details are never shown.</p></div>
+        <label>Display name<input value={profileNameDraft} onChange={event => setProfileNameDraft(event.target.value)} maxLength={40} placeholder={user?.username ?? "Your name"} /></label>
+        <label>Short bio<textarea value={profileBioDraft} onChange={event => setProfileBioDraft(event.target.value)} maxLength={160} rows={3} placeholder="A little about your training…" /></label>
+        <div className="composer-footer"><small>{profileBioDraft.length}/160 · Visible to accepted friends</small><button disabled={profileSaving}>{profileSaving ? "Saving…" : "Save profile"}</button></div>
+      </form>
       <div className="content-grid">
         <form className="panel" onSubmit={sendFriendRequest}>
           <p className="eyebrow">FIND YOUR PEOPLE</p><h2>Add a friend</h2>
@@ -1168,19 +1413,34 @@ export default function App() {
             <ul className="log-list">{connections.map(connection => {
               const incoming = connection.addressee.id === user?.id;
               const person = incoming ? connection.requester : connection.addressee;
-              return <li key={connection.id}><strong>@{person.username}</strong><span>{connection.status === "accepted" ? "Connected" : incoming ? "Waiting for your reply" : "Request sent"}</span>
-                {connection.status === "pending" && incoming && <button className="small-button" onClick={() => void acceptFriendRequest(connection.id)}>Accept request</button>}
+              return <li key={connection.id}><strong>{person.displayName || "@" + person.username}</strong><span>@{person.username} · {connection.status === "accepted" ? "Connected" : incoming ? "Waiting for your reply" : "Request sent"}</span>
+                {connection.status === "pending" && incoming && <div className="connection-actions"><button type="button" className="small-button" onClick={() => void acceptFriendRequest(connection.id)}>Accept</button><button type="button" className="small-button secondary" onClick={() => void manageFriendRequest(connection.id, "decline")}>Decline</button></div>}
+                {connection.status === "pending" && !incoming && <button type="button" className="small-button secondary" onClick={() => void manageFriendRequest(connection.id, "cancel")}>Cancel request</button>}
+                {connection.status === "accepted" && <button type="button" className="small-button secondary" onClick={() => void removeFriend(connection.id)}>Remove friend</button>}
+                <div className="connection-actions"><button type="button" className="small-button secondary" onClick={() => void reportCommunityTarget("user", person.id)}>Report account</button><button type="button" className="small-button secondary" onClick={() => void blockCommunityUser(person.id)}>Block</button></div>
               </li>;
             })}</ul>}
         </section>
       </div>
       <section className="panel section-gap">
+        <p className="eyebrow">PRIVACY & SAFETY</p><h2>Blocked accounts</h2>
+        {blockedAccounts.length === 0 ? <p className="muted">You haven't blocked anyone.</p> : <ul className="log-list">{blockedAccounts.map(account => <li key={account.id}><strong>{account.displayName || "@" + account.username}</strong><span>@{account.username}</span><button type="button" className="small-button secondary" onClick={() => void unblockCommunityUser(account.id)}>Unblock</button></li>)}</ul>}
+      </section>
+      <form className="panel community-composer" onSubmit={createCommunityPost}>
+        <p className="eyebrow">SHARE A MOMENT</p><h2>What's on your training mind?</h2>
+        <label className="sr-only" htmlFor="community-post">Write a community update</label>
+        <textarea id="community-post" value={communityPostDraft} onChange={event => setCommunityPostDraft(event.target.value)} placeholder="Share a win, a goal or a training thought with your friends…" rows={3} maxLength={500} />
+        <div className="composer-footer"><small>{communityPostDraft.trim().length}/500 · Shared with accepted friends</small><button disabled={!communityPostDraft.trim()}>Share update</button></div>
+      </form>
+      <section className="panel section-gap">
         <p className="eyebrow">FRIENDS-ONLY FEED</p><h2>Recent activity</h2>
         {posts.length === 0 && communityLoading ? <p className="muted" role="status">Loading recent activity…</p> : posts.length === 0 && communityError ? <p className="muted">The feed is unavailable until the community can be refreshed.</p> : posts.length === 0 ? <p className="muted">No shared workouts yet. Once you and your friends log a session, it can appear here.</p> :
           <div className="feed-list">{posts.map(post => <article className="feed-card" key={post.id}>
-            <div className="feed-heading"><strong>@{post.user.username}</strong><span>{new Date(post.createdAt).toLocaleString()}</span></div>
-            <p>{post.session?.routine?.name ?? "Completed a workout"}</p>
-            {post.session && <p className="muted">{post.session.sets.length} sets · {post.session.sets.map(item => item.exercise.name).filter((name, index, all) => all.indexOf(name) === index).join(", ")}</p>}
+            <div className="feed-heading"><div className="feed-author"><span className="feed-avatar" aria-hidden="true">{(post.user.displayName || post.user.username).slice(0, 1).toUpperCase()}</span><div><strong>{post.user.displayName || "@" + post.user.username}</strong><small>@{post.user.username}</small></div></div><span>{new Date(post.createdAt).toLocaleString()}</span></div>
+            {post.text ? <p className="community-post-text">{post.text}</p> : <p>{post.session?.routine?.name ?? "Completed a workout"}</p>}
+            {post.session && <p className="muted">{post.session.routine?.name ?? "Workout"} · {post.session.sets.length} sets · {post.session.sets.map(item => item.exercise.name).filter((name, index, all) => all.indexOf(name) === index).join(", ")}</p>}
+            {post.user.id === user?.id && <button type="button" className="small-button post-delete" onClick={() => void deleteCommunityPost(post.id)}>Delete post</button>}
+            {post.user.id !== user?.id && <div className="connection-actions"><button type="button" className="small-button secondary" onClick={() => void reportCommunityTarget("post", post.id)}>Report post</button><button type="button" className="small-button secondary" onClick={() => void blockCommunityUser(post.user.id)}>Block author</button></div>}
             <div className="reaction-row"><button className="reaction-button" onClick={() => void reactToPost(post.id, "like")}>👏 {post.reactions.filter(item => item.value === "like").length} Like</button><button className="reaction-button" onClick={() => void reactToPost(post.id, "strong")}>💪 Strong</button><button className="reaction-button" onClick={() => void reactToPost(post.id, "clap")}>🙌 Clap</button></div>
             {post.comments.map(comment => <p className="comment" key={comment.id}><strong>@{comment.user.username}</strong> {comment.text}</p>)}
             <form className="comment-form" onSubmit={event => void commentOnPost(event, post.id)}>
